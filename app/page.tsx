@@ -2,8 +2,15 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, doc, onSnapshot, setDoc, deleteDoc } from "firebase/firestore";
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged, 
+  GoogleAuthProvider, 
+  signInWithPopup,
+  signOut 
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDhHHzBrFUWyudcVDfwKliG5gM10WmDIFM",
@@ -49,6 +56,7 @@ const getContrastColor = (hex?: string) => {
 export default function ProductivityApp() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
@@ -63,14 +71,17 @@ export default function ProductivityApp() {
 
   // --- FIREBASE SYNC LOGIC ---
   useEffect(() => {
-    signInAnonymously(auth);
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid);
+        setUserEmail(user.email);
         const unsubData = onSnapshot(doc(db, "users", user.uid), (doc) => {
           if (doc.exists()) setProjects(doc.data().projects || []);
+          else setProjects([]); // Clear UI if no cloud data exists for this user
         });
         return () => unsubData();
+      } else {
+        signInAnonymously(auth);
       }
     });
     return () => unsubAuth();
@@ -81,12 +92,29 @@ export default function ProductivityApp() {
     await setDoc(doc(db, "users", userId), { projects: updatedProjects }, { merge: true });
   };
 
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err) {
+      console.error("Login Error:", err);
+    }
+  };
+
+  const handleLogout = () => signOut(auth);
+
   // --- ACTIONS ---
   const addProject = () => {
     if (!newProjectName.trim()) return;
     const newList = [...projects, { id: crypto.randomUUID(), name: newProjectName.trim(), tasks: [], bgColor: '' }];
     saveToCloud(newList);
     setNewProjectName('');
+  };
+
+  const deleteProject = (projectId: string) => {
+    if (!confirm("Are you sure you want to delete this whole list?")) return;
+    const newList = projects.filter(p => p.id !== projectId);
+    saveToCloud(newList);
   };
 
   const updateProjectColor = (projectId: string, color: string) => {
@@ -139,12 +167,24 @@ export default function ProductivityApp() {
     setDraggedTask(null);
   };
 
-  // --- UI (Maintained from your previous version) ---
   return (
     <div className={`min-h-screen transition-colors duration-300 ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
       <div className={`${ACCENT_CLASS_MAP[accent].bg} text-white`}>
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
-          <h1 className="text-lg font-semibold tracking-tight">My todo lists {userId ? '☁️' : '⌛'}</h1>
+          <div className="flex items-center gap-4">
+            <h1 className="text-lg font-semibold tracking-tight">Vapor Lists</h1>
+            {userEmail ? (
+              <button onClick={handleLogout} className="group flex items-center gap-2 text-[10px] bg-white/10 hover:bg-white/20 px-3 py-1 rounded-full transition-all">
+                <span className="opacity-70 group-hover:hidden uppercase tracking-widest">Synced: {userEmail.split('@')[0]}</span>
+                <span className="hidden group-hover:inline uppercase tracking-widest font-bold">Sign Out?</span>
+              </button>
+            ) : (
+              <button onClick={handleGoogleLogin} className="text-[10px] bg-white text-black px-3 py-1 rounded-full font-bold hover:bg-zinc-100 transition-all uppercase tracking-tighter">
+                Cloud Sync ☁️
+              </button>
+            )}
+          </div>
+          
           <div className="flex items-center gap-6">
             <button onClick={() => setIsDark(!isDark)} className="text-xl opacity-80 hover:opacity-100">{isDark ? '☀️' : '🌙'}</button>
             <div className="flex gap-2">
@@ -204,7 +244,10 @@ export default function ProductivityApp() {
                         <input type="color" value={project.bgColor || (isDark ? "#18181b" : "#ffffff")} onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                     </div>
                   </div>
-                  <button onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`flex items-center justify-center h-7 w-7 rounded-full bg-black/5 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 transition-all hover:scale-110 active:scale-95`}><span className={`transition-transform duration-300 inline-block text-lg ${isCollapsed ? '' : 'rotate-90'}`}>▸</span></button>
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button onClick={() => deleteProject(project.id)} className="p-1.5 hover:bg-red-500/20 rounded-md text-red-400">🗑️</button>
+                    <button onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`flex items-center justify-center h-7 w-7 rounded-full bg-black/5 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 transition-all hover:scale-110 active:scale-95`}><span className={`transition-transform duration-300 inline-block text-lg ${isCollapsed ? '' : 'rotate-90'}`}>▸</span></button>
+                  </div>
                 </div>
                 <div className="w-full h-[2px] bg-zinc-100 dark:bg-zinc-800/50 mb-4 rounded-full overflow-hidden">
                     <div className={`h-full transition-all duration-500 ${ACCENT_CLASS_MAP[accent].bg}`} style={{ width: `${progress}%` }} />
