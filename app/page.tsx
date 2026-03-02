@@ -57,6 +57,7 @@ export default function ProductivityApp() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [isCompact, setIsCompact] = useState<boolean>(false);
@@ -72,7 +73,6 @@ export default function ProductivityApp() {
           if (doc.exists()) {
             const data = doc.data();
             setProjects(data.projects || []);
-            // LOAD ACCENT FROM CLOUD
             if (data.accent) setAccent(data.accent);
           }
         });
@@ -84,7 +84,6 @@ export default function ProductivityApp() {
     return () => unsubAuth();
   }, []);
 
-  // Updated save function to handle both projects and settings
   const saveToCloud = async (updatedProjects: Project[], updatedAccent?: Accent) => {
     if (!userId) return;
     const cleanProjects = JSON.parse(JSON.stringify(updatedProjects));
@@ -157,9 +156,12 @@ export default function ProductivityApp() {
     saveToCloud(newList);
   };
 
+  // Filter projects by Tab and Search
   const visibleProjects = projects.filter(p => {
-    if (activeTab === 'active') return !p.isCompleted;
-    return p.isCompleted || p.tasks.some(t => t.completed);
+    const matchesTab = activeTab === 'active' ? !p.isCompleted : (p.isCompleted || p.tasks.some(t => t.completed));
+    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                          p.tasks.some(t => t.text.toLowerCase().includes(searchQuery.toLowerCase()));
+    return matchesTab && matchesSearch;
   });
 
   return (
@@ -181,11 +183,7 @@ export default function ProductivityApp() {
             <button onClick={() => setIsDark(!isDark)} className="text-xl">{isDark ? '☀️' : '🌙'}</button>
             <div className="flex gap-1.5">
               {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
-                <button 
-                  key={color} 
-                  onClick={() => updateAccent(color)} 
-                  className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} 
-                />
+                <button key={color} onClick={() => updateAccent(color)} className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} />
               ))}
             </div>
           </div>
@@ -205,9 +203,13 @@ export default function ProductivityApp() {
           </div>
         </div>
 
-        <div className="flex gap-3 max-w-2xl mb-10">
-          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-1 px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900" />
-          <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white ${ACCENT_CLASS_MAP[accent].bg}`}>Add List</button>
+        <div className="flex flex-col md:flex-row gap-3 max-w-3xl mb-10">
+          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-[2] px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-300" />
+          <div className="flex-1 relative">
+             <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search..." className="w-full px-4 py-2 pl-9 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none" />
+             <span className="absolute left-3 top-2.5 text-xs opacity-40">🔍</span>
+          </div>
+          <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white shadow-sm ${ACCENT_CLASS_MAP[accent].bg}`}>Add List</button>
         </div>
 
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 items-start">
