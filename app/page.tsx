@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { initializeApp, getApps } from "firebase/app";
 import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 import { 
@@ -26,7 +26,6 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0
 const db = getFirestore(app);
 const auth = getAuth(app);
 
-// --- Types ---
 interface Task { id: string; text: string; completed: boolean; completedAt?: string; }
 interface Project { id: string; name: string; tasks: Task[]; bgColor?: string; isCompleted?: boolean; }
 type Accent = 'gray' | 'indigo' | 'violet' | 'fuchsia' | 'rose' | 'amber' | 'emerald' | 'teal' | 'cyan' | 'lime';
@@ -58,15 +57,11 @@ export default function ProductivityApp() {
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [isCompact, setIsCompact] = useState<boolean>(false);
   const [isDark, setIsDark] = useState<boolean>(true);
   const [accent, setAccent] = useState<Accent>('indigo');
-  
-  const [draggedProjectIndex, setDraggedProjectIndex] = useState<number | null>(null);
-  const [draggedTask, setDraggedTask] = useState<{tid: string, pid: string} | null>(null);
 
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
@@ -86,7 +81,9 @@ export default function ProductivityApp() {
 
   const saveToCloud = async (updatedProjects: Project[]) => {
     if (!userId) return;
-    await setDoc(doc(db, "users", userId), { projects: updatedProjects }, { merge: true });
+    // Strip out any potential undefined values before sending to Firebase
+    const cleanProjects = JSON.parse(JSON.stringify(updatedProjects));
+    await setDoc(doc(db, "users", userId), { projects: cleanProjects }, { merge: true });
   };
 
   const handleGoogleLogin = async () => {
@@ -104,7 +101,7 @@ export default function ProductivityApp() {
   };
 
   const deleteProject = (projectId: string) => {
-    if (!confirm("Delete this list permanently?")) return;
+    if (!confirm("Delete this list?")) return;
     saveToCloud(projects.filter(p => p.id !== projectId));
   };
 
@@ -127,21 +124,35 @@ export default function ProductivityApp() {
   };
 
   const toggleTask = (projectId: string, taskId: string) => {
-    const newList = projects.map(p => p.id === projectId ? {
-      ...p, tasks: p.tasks.map(t => {
-        if (t.id === taskId) {
+    const newList = projects.map(p => {
+      if (p.id !== projectId) return p;
+      return {
+        ...p,
+        tasks: p.tasks.map(t => {
+          if (t.id !== taskId) return t;
           const isCompleting = !t.completed;
-          return { 
-            ...t, 
-            completed: isCompleting, 
-            completedAt: isCompleting ? new Date().toLocaleDateString() : undefined 
-          };
-        }
-        return t;
-      })
-    } : p);
+          const updatedTask = { ...t, completed: isCompleting };
+          
+          if (isCompleting) {
+            updatedTask.completedAt = new Date().toLocaleDateString();
+          } else {
+            // Remove the field entirely so Firebase doesn't see 'undefined'
+            delete updatedTask.completedAt;
+          }
+          return updatedTask;
+        })
+      };
+    });
     saveToCloud(newList);
   };
+
+  const visibleProjects = projects.filter(p => {
+    if (activeTab === 'active') {
+      return !p.isCompleted;
+    } else {
+      return p.isCompleted || p.tasks.some(t => t.completed);
+    }
+  });
 
   return (
     <div className={`min-h-screen transition-colors duration-300 ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
@@ -150,23 +161,19 @@ export default function ProductivityApp() {
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-semibold tracking-tight">Vapor Lists</h1>
             {userEmail ? (
-              <button onClick={handleLogout} className="group flex items-center gap-2 text-[10px] bg-white/10 hover:bg-white/20 px-3 py-1 rounded-md transition-all border border-white/10">
-                <span className="opacity-70 group-hover:hidden uppercase tracking-widest font-medium">{userEmail}</span>
+              <button onClick={handleLogout} className="group flex items-center gap-2 text-[10px] bg-white/10 px-3 py-1.5 rounded-md border border-white/10">
+                <span className="opacity-70 group-hover:hidden uppercase tracking-widest">{userEmail}</span>
                 <span className="hidden group-hover:inline uppercase tracking-widest font-bold text-rose-300">Sign Out</span>
               </button>
             ) : (
-              <button onClick={handleGoogleLogin} className="flex items-center gap-3 bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[13px] font-medium shadow-sm hover:shadow-md hover:bg-zinc-50 transition-all border border-zinc-200">
-                <svg width="18" height="18" viewBox="0 0 18 18"><path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/><path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/><path d="M3.964 10.707a5.41 5.41 0 010-3.414V4.961H.957a8.992 8.992 0 000 8.078l3.007-2.332z" fill="#FBBC05"/><path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.961L3.964 7.293c.708-2.127 2.692-3.713 5.036-3.713z" fill="#EA4335"/></svg>
-                Sign in with Google
-              </button>
+              <button onClick={handleGoogleLogin} className="flex items-center gap-2 bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[12px] font-bold">Sign in with Google</button>
             )}
           </div>
-          
-          <div className="flex items-center gap-6">
-            <button onClick={() => setIsDark(!isDark)} className="text-xl opacity-80 hover:opacity-100">{isDark ? '☀️' : '🌙'}</button>
-            <div className="flex gap-2">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setIsDark(!isDark)} className="text-xl">{isDark ? '☀️' : '🌙'}</button>
+            <div className="flex gap-1.5">
               {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
-                <button key={color} onClick={() => setAccent(color)} className={`w-5 h-5 rounded-full border-2 transition-all ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} />
+                <button key={color} onClick={() => setAccent(color)} className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} />
               ))}
             </div>
           </div>
@@ -176,67 +183,60 @@ export default function ProductivityApp() {
       <div className="max-w-7xl mx-auto p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
           <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
-            <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-all ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
-            <button onClick={() => setActiveTab('completed')} className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-all ${activeTab === 'completed' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Archive</button>
+            <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-xs font-semibold rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
+            <button onClick={() => setActiveTab('completed')} className={`px-4 py-1.5 text-xs font-semibold rounded-md ${activeTab === 'completed' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Archive</button>
           </div>
-          
           <div className="flex items-center gap-4 text-[11px] font-bold uppercase tracking-wider text-zinc-400">
             <button onClick={() => setIsCompact(!isCompact)}>{isCompact ? 'Comfortable' : 'Compact'}</button>
-            <div className="w-px h-3 bg-zinc-200 dark:bg-zinc-800" />
             <button onClick={() => setCollapsed(Object.fromEntries(projects.map(p => [p.id, true])))}>Collapse All</button>
             <button onClick={() => setCollapsed({})}>Show All</button>
           </div>
         </div>
 
-        <div className="flex flex-col md:flex-row gap-3 max-w-2xl mb-10">
-          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="Create a new list..." className="flex-[2] px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-100 dark:focus:ring-zinc-800" />
-          <div className="flex-1 relative">
-             <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search tasks..." className="w-full px-4 py-2 pl-9 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-400" />
-             <span className="absolute left-3 top-2.5 text-xs opacity-40">🔍</span>
-          </div>
-          <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white shadow-md ${ACCENT_CLASS_MAP[accent].bg}`}>Add</button>
+        <div className="flex gap-3 max-w-2xl mb-10">
+          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-1 px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900" />
+          <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white ${ACCENT_CLASS_MAP[accent].bg}`}>Add List</button>
         </div>
 
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 items-start">
-          {projects
-            .filter(p => (activeTab === 'active' ? !p.isCompleted : p.isCompleted))
-            .map((project, pIndex) => {
+          {visibleProjects.map((project) => {
               const isCollapsed = collapsed[project.id];
               const tasks = project.tasks.filter(t => (activeTab === 'active' ? !t.completed : t.completed));
               const progress = project.tasks.length ? (project.tasks.filter(t => t.completed).length / project.tasks.length) * 100 : 0;
               const contrastClass = getContrastColor(project.bgColor);
 
+              if (activeTab === 'completed' && tasks.length === 0 && !project.isCompleted) return null;
+
               return (
-                <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all shadow-sm ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
+                <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
                   <div className="flex justify-between items-center text-sm font-bold mb-2">
-                    <div className="flex items-center gap-3">
-                      <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight ${contrastClass}`}>{project.name}</span>
-                      <div className="relative flex items-center justify-center h-7 w-7 rounded-full bg-black/5 dark:bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <span className="text-base">🖌️</span>
-                          <input type="color" value={project.bgColor || "#ffffff"} onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                      </div>
-                    </div>
+                    <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>{project.name}</span>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="relative h-6 w-6">
+                        <span className="absolute inset-0 flex items-center justify-center text-xs">🎨</span>
+                        <input type="color" onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                      </div>
                       <button onClick={() => toggleProjectComplete(project.id)} className={`p-1.5 rounded hover:bg-black/5 ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
-                      <button onClick={() => deleteProject(project.id)} className="p-1.5 hover:bg-red-500/20 rounded-md text-red-400">🗑️</button>
-                      <button onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className="h-7 w-7 rounded-full bg-black/5 dark:bg-white/10"><span className={`transition-transform inline-block ${isCollapsed ? '' : 'rotate-90'}`}>▸</span></button>
+                      <button onClick={() => deleteProject(project.id)} className="p-1.5 text-rose-400">🗑️</button>
                     </div>
                   </div>
-                  <div className="w-full h-[2px] bg-zinc-100 dark:bg-zinc-800/50 mb-4 rounded-full overflow-hidden">
-                      <div className={`h-full transition-all duration-500 ${ACCENT_CLASS_MAP[accent].bg}`} style={{ width: `${progress}%` }} />
+                  <div className="w-full h-[2px] bg-black/10 dark:bg-white/10 mb-4 rounded-full overflow-hidden">
+                      <div className={`h-full ${ACCENT_CLASS_MAP[accent].bg}`} style={{ width: `${progress}%` }} />
                   </div>
                   {!isCollapsed && (
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                       {tasks.map((task) => (
-                        <div key={task.id} className={`flex items-center justify-between text-sm rounded-lg group/task transition-all ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'} ${isCompact ? 'px-2 py-2' : 'px-4 py-3'}`}>
+                        <div key={task.id} className={`flex items-center justify-between rounded-lg group/task ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'} ${isCompact ? 'px-2 py-1' : 'px-3 py-1.5'}`}>
                           <div className="flex flex-col">
-                              <span className={`${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
-                              {task.completedAt && <span className={`text-[9px] font-bold opacity-30 uppercase mt-0.5 ${contrastClass}`}>Finished: {task.completedAt}</span>}
+                              <span className={`text-[13px] leading-tight ${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
+                              {task.completedAt && <span className={`text-[9px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Done: {task.completedAt}</span>}
                           </div>
-                          <button onClick={() => toggleTask(project.id, task.id)} className="text-[10px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity">{task.completed ? 'UNDO' : 'DONE'}</button>
+                          <button onClick={() => toggleTask(project.id, task.id)} className="text-[10px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity">
+                            {task.completed ? 'UNDO' : 'DONE'}
+                          </button>
                         </div>
                       ))}
-                      {activeTab === 'active' && <input placeholder="Add task..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 focus:outline-none transition-all py-2 text-sm ${contrastClass} placeholder:opacity-40`} onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, e.currentTarget.value); e.currentTarget.value = ''; } }} />}
+                      {activeTab === 'active' && <input placeholder="Add item..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, e.currentTarget.value); e.currentTarget.value = ''; } }} />}
                     </div>
                   )}
                 </div>
