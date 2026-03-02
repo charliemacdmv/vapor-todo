@@ -69,7 +69,12 @@ export default function ProductivityApp() {
         setUserId(user.uid);
         setUserEmail(user.email);
         const unsubData = onSnapshot(doc(db, "users", user.uid), (doc) => {
-          if (doc.exists()) setProjects(doc.data().projects || []);
+          if (doc.exists()) {
+            const data = doc.data();
+            setProjects(data.projects || []);
+            // LOAD ACCENT FROM CLOUD
+            if (data.accent) setAccent(data.accent);
+          }
         });
         return () => unsubData();
       } else {
@@ -79,11 +84,19 @@ export default function ProductivityApp() {
     return () => unsubAuth();
   }, []);
 
-  const saveToCloud = async (updatedProjects: Project[]) => {
+  // Updated save function to handle both projects and settings
+  const saveToCloud = async (updatedProjects: Project[], updatedAccent?: Accent) => {
     if (!userId) return;
-    // Strip out any potential undefined values before sending to Firebase
     const cleanProjects = JSON.parse(JSON.stringify(updatedProjects));
-    await setDoc(doc(db, "users", userId), { projects: cleanProjects }, { merge: true });
+    await setDoc(doc(db, "users", userId), { 
+      projects: cleanProjects,
+      accent: updatedAccent || accent 
+    }, { merge: true });
+  };
+
+  const updateAccent = (newAccent: Accent) => {
+    setAccent(newAccent);
+    saveToCloud(projects, newAccent);
   };
 
   const handleGoogleLogin = async () => {
@@ -132,11 +145,9 @@ export default function ProductivityApp() {
           if (t.id !== taskId) return t;
           const isCompleting = !t.completed;
           const updatedTask = { ...t, completed: isCompleting };
-          
           if (isCompleting) {
             updatedTask.completedAt = new Date().toLocaleDateString();
           } else {
-            // Remove the field entirely so Firebase doesn't see 'undefined'
             delete updatedTask.completedAt;
           }
           return updatedTask;
@@ -147,11 +158,8 @@ export default function ProductivityApp() {
   };
 
   const visibleProjects = projects.filter(p => {
-    if (activeTab === 'active') {
-      return !p.isCompleted;
-    } else {
-      return p.isCompleted || p.tasks.some(t => t.completed);
-    }
+    if (activeTab === 'active') return !p.isCompleted;
+    return p.isCompleted || p.tasks.some(t => t.completed);
   });
 
   return (
@@ -166,14 +174,18 @@ export default function ProductivityApp() {
                 <span className="hidden group-hover:inline uppercase tracking-widest font-bold text-rose-300">Sign Out</span>
               </button>
             ) : (
-              <button onClick={handleGoogleLogin} className="flex items-center gap-2 bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[12px] font-bold">Sign in with Google</button>
+              <button onClick={handleGoogleLogin} className="flex items-center gap-2 bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[12px] font-bold">Sign in</button>
             )}
           </div>
           <div className="flex items-center gap-4">
             <button onClick={() => setIsDark(!isDark)} className="text-xl">{isDark ? '☀️' : '🌙'}</button>
             <div className="flex gap-1.5">
               {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
-                <button key={color} onClick={() => setAccent(color)} className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} />
+                <button 
+                  key={color} 
+                  onClick={() => updateAccent(color)} 
+                  className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} 
+                />
               ))}
             </div>
           </div>
@@ -208,7 +220,7 @@ export default function ProductivityApp() {
               if (activeTab === 'completed' && tasks.length === 0 && !project.isCompleted) return null;
 
               return (
-                <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
+                <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all shadow-sm ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
                   <div className="flex justify-between items-center text-sm font-bold mb-2">
                     <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>{project.name}</span>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -227,11 +239,11 @@ export default function ProductivityApp() {
                     <div className="space-y-1.5">
                       {tasks.map((task) => (
                         <div key={task.id} className={`flex items-center justify-between rounded-lg group/task ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'} ${isCompact ? 'px-2 py-1' : 'px-3 py-1.5'}`}>
-                          <div className="flex flex-col">
-                              <span className={`text-[13px] leading-tight ${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
-                              {task.completedAt && <span className={`text-[9px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Done: {task.completedAt}</span>}
+                          <div className="flex flex-col pr-2 overflow-hidden">
+                              <span className={`text-[12px] leading-tight ${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
+                              {task.completedAt && <span className={`text-[8px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Finished: {task.completedAt}</span>}
                           </div>
-                          <button onClick={() => toggleTask(project.id, task.id)} className="text-[10px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity">
+                          <button onClick={() => toggleTask(project.id, task.id)} className="text-[9px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity whitespace-nowrap">
                             {task.completed ? 'UNDO' : 'DONE'}
                           </button>
                         </div>
