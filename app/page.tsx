@@ -2,14 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged, 
-  GoogleAuthProvider, 
-  signInWithPopup,
-  signOut 
+  getFirestore, doc, onSnapshot, setDoc, collection, 
+  query, where, deleteDoc, updateDoc, arrayUnion 
+} from "firebase/firestore";
+import { 
+  getAuth, signInAnonymously, onAuthStateChanged, 
+  GoogleAuthProvider, signInWithPopup, signOut 
 } from "firebase/auth";
 
 const firebaseConfig = {
@@ -27,7 +26,17 @@ const db = getFirestore(app);
 const auth = getAuth(app);
 
 interface Task { id: string; text: string; completed: boolean; completedAt?: string; }
-interface Project { id: string; name: string; tasks: Task[]; bgColor?: string; isCompleted?: boolean; }
+interface SharedUser { email: string; role: 'edit' | 'view'; }
+interface Project { 
+  id: string; 
+  name: string; 
+  tasks: Task[]; 
+  bgColor?: string; 
+  isCompleted?: boolean; 
+  ownerId: string;
+  allowedEmails: string[];
+  sharedWith?: SharedUser[];
+}
 type Accent = 'gray' | 'indigo' | 'violet' | 'fuchsia' | 'rose' | 'amber' | 'emerald' | 'teal' | 'cyan' | 'lime';
 
 const ACCENT_CLASS_MAP: Record<Accent, { bg: string; dot: string; bar: string }> = {
@@ -53,6 +62,7 @@ const getContrastColor = (hex?: string) => {
 };
 
 export default function ProductivityApp() {
+  const [mounted, setMounted] = useState(false); // Fix for Hydration Error
   const [projects, setProjects] = useState<Project[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -65,18 +75,19 @@ export default function ProductivityApp() {
   const [accent, setAccent] = useState<Accent>('indigo');
 
   useEffect(() => {
+    setMounted(true);
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid);
         setUserEmail(user.email);
-        const unsubData = onSnapshot(doc(db, "users", user.uid), (doc) => {
-          if (doc.exists()) {
-            const data = doc.data();
-            setProjects(data.projects || []);
-            if (data.accent) setAccent(data.accent);
-          }
+        const q = query(collection(db, "projects"), where("allowedEmails", "array-contains", user.email || user.uid));
+        const unsubProjects = onSnapshot(q, (snapshot) => {
+          setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
         });
-        return () => unsubData();
+        const unsubSettings = onSnapshot(doc(db, "users", user.uid), (doc) => {
+          if (doc.exists() && doc.data().accent) setAccent(doc.data().accent);
+        });
+        return () => { unsubProjects(); unsubSettings(); };
       } else {
         signInAnonymously(auth);
       }
@@ -84,19 +95,7 @@ export default function ProductivityApp() {
     return () => unsubAuth();
   }, []);
 
-  const saveToCloud = async (updatedProjects: Project[], updatedAccent?: Accent) => {
-    if (!userId) return;
-    const cleanProjects = JSON.parse(JSON.stringify(updatedProjects));
-    await setDoc(doc(db, "users", userId), { 
-      projects: cleanProjects,
-      accent: updatedAccent || accent 
-    }, { merge: true });
-  };
-
-  const updateAccent = (newAccent: Accent) => {
-    setAccent(newAccent);
-    saveToCloud(projects, newAccent);
-  };
+  if (!mounted) return <div className="min-h-screen bg-zinc-950" />;
 
   const handleGoogleLogin = async () => {
     const provider = new GoogleAuthProvider();
@@ -105,58 +104,68 @@ export default function ProductivityApp() {
 
   const handleLogout = () => signOut(auth);
 
-  const addProject = () => {
-    if (!newProjectName.trim()) return;
-    const newList = [...projects, { id: crypto.randomUUID(), name: newProjectName.trim(), tasks: [], bgColor: '', isCompleted: false }];
-    saveToCloud(newList);
+  const updateAccent = async (newAccent: Accent) => {
+    setAccent(newAccent);
+    if (userId) await setDoc(doc(db, "users", userId), { accent: newAccent }, { merge: true });
+  };
+
+  const addProject = async () => {
+    if (!newProjectName.trim() || !userId) return;
+    const id = crypto.randomUUID();
+    const newProj = {
+      name: newProjectName.trim(),
+      tasks: [],
+      bgColor: '',
+      isCompleted: false,
+      ownerId: userId,
+      allowedEmails: [userEmail || userId],
+      sharedWith: []
+    };
+    await setDoc(doc(db, "projects", id), newProj);
     setNewProjectName('');
   };
 
-  const deleteProject = (projectId: string) => {
-    if (!confirm("Delete this list?")) return;
-    saveToCloud(projects.filter(p => p.id !== projectId));
-  };
-
-  const toggleProjectComplete = (projectId: string) => {
-    const newList = projects.map(p => p.id === projectId ? { ...p, isCompleted: !p.isCompleted } : p);
-    saveToCloud(newList);
-  };
-
-  const updateProjectColor = (projectId: string, color: string) => {
-    const newList = projects.map(p => p.id === projectId ? { ...p, bgColor: color } : p);
-    saveToCloud(newList);
-  };
-
-  const addTask = (projectId: string, text: string) => {
-    if (!text.trim()) return;
-    const newList = projects.map(p => p.id === projectId ? {
-      ...p, tasks: [...p.tasks, { id: crypto.randomUUID(), text: text.trim(), completed: false }]
-    } : p);
-    saveToCloud(newList);
-  };
-
-  const toggleTask = (projectId: string, taskId: string) => {
-    const newList = projects.map(p => {
-      if (p.id !== projectId) return p;
-      return {
-        ...p,
-        tasks: p.tasks.map(t => {
-          if (t.id !== taskId) return t;
-          const isCompleting = !t.completed;
-          const updatedTask = { ...t, completed: isCompleting };
-          if (isCompleting) {
-            updatedTask.completedAt = new Date().toLocaleDateString();
-          } else {
-            delete updatedTask.completedAt;
-          }
-          return updatedTask;
-        })
-      };
+  const shareProject = async (projectId: string) => {
+    const email = prompt("Enter the email to share with:");
+    if (!email) return;
+    const role = confirm("Give EDIT access? (Cancel for VIEW ONLY)") ? 'edit' : 'view';
+    await updateDoc(doc(db, "projects", projectId), {
+      sharedWith: arrayUnion({ email: email.toLowerCase().trim(), role }),
+      allowedEmails: arrayUnion(email.toLowerCase().trim())
     });
-    saveToCloud(newList);
   };
 
-  // Filter projects by Tab and Search
+  const deleteProject = async (projectId: string) => {
+    if (!confirm("Delete this list?")) return;
+    await deleteDoc(doc(db, "projects", projectId));
+  };
+
+  const toggleProjectComplete = async (projectId: string, current: boolean) => {
+    await updateDoc(doc(db, "projects", projectId), { isCompleted: !current });
+  };
+
+  const updateProjectColor = async (projectId: string, color: string) => {
+    await updateDoc(doc(db, "projects", projectId), { bgColor: color });
+  };
+
+  const addTask = async (projectId: string, projectTasks: Task[], text: string) => {
+    if (!text.trim()) return;
+    const updatedTasks = [...projectTasks, { id: crypto.randomUUID(), text: text.trim(), completed: false }];
+    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
+  };
+
+  const toggleTask = async (projectId: string, projectTasks: Task[], taskId: string) => {
+    const updatedTasks = projectTasks.map(t => {
+      if (t.id !== taskId) return t;
+      const isCompleting = !t.completed;
+      const task = { ...t, completed: isCompleting };
+      if (isCompleting) task.completedAt = new Date().toLocaleDateString();
+      else delete task.completedAt;
+      return task;
+    });
+    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
+  };
+
   const visibleProjects = projects.filter(p => {
     const matchesTab = activeTab === 'active' ? !p.isCompleted : (p.isCompleted || p.tasks.some(t => t.completed));
     const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
@@ -176,7 +185,7 @@ export default function ProductivityApp() {
                 <span className="hidden group-hover:inline uppercase tracking-widest font-bold text-rose-300">Sign Out</span>
               </button>
             ) : (
-              <button onClick={handleGoogleLogin} className="flex items-center gap-2 bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[12px] font-bold">Sign in</button>
+              <button onClick={handleGoogleLogin} className="bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[10px] font-bold">Sign in with Google</button>
             )}
           </div>
           <div className="flex items-center gap-4">
@@ -215,23 +224,30 @@ export default function ProductivityApp() {
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 items-start">
           {visibleProjects.map((project) => {
               const isCollapsed = collapsed[project.id];
+              const userRole = project.ownerId === userId ? 'edit' : (project.sharedWith?.find(u => u.email === userEmail)?.role || 'view');
+              const canEdit = userRole === 'edit';
               const tasks = project.tasks.filter(t => (activeTab === 'active' ? !t.completed : t.completed));
               const progress = project.tasks.length ? (project.tasks.filter(t => t.completed).length / project.tasks.length) * 100 : 0;
               const contrastClass = getContrastColor(project.bgColor);
 
-              if (activeTab === 'completed' && tasks.length === 0 && !project.isCompleted) return null;
-
               return (
                 <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all shadow-sm ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
                   <div className="flex justify-between items-center text-sm font-bold mb-2">
-                    <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>{project.name}</span>
+                    <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>
+                      {project.name} {project.ownerId !== userId && '🤝'}
+                    </span>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <div className="relative h-6 w-6">
-                        <span className="absolute inset-0 flex items-center justify-center text-xs">🎨</span>
-                        <input type="color" onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                      </div>
-                      <button onClick={() => toggleProjectComplete(project.id)} className={`p-1.5 rounded hover:bg-black/5 ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
-                      <button onClick={() => deleteProject(project.id)} className="p-1.5 text-rose-400">🗑️</button>
+                      {canEdit && (
+                        <>
+                          <button onClick={() => shareProject(project.id)} className={`p-1 text-xs ${contrastClass}`} title="Share">👤</button>
+                          <div className="relative h-6 w-6">
+                            <span className="absolute inset-0 flex items-center justify-center text-xs">🎨</span>
+                            <input type="color" onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                          </div>
+                          <button onClick={() => toggleProjectComplete(project.id, !!project.isCompleted)} className={`p-1.5 rounded hover:bg-black/5 ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
+                          <button onClick={() => deleteProject(project.id)} className="p-1.5 text-rose-400">🗑️</button>
+                        </>
+                      )}
                     </div>
                   </div>
                   <div className="w-full h-[2px] bg-black/10 dark:bg-white/10 mb-4 rounded-full overflow-hidden">
@@ -245,12 +261,14 @@ export default function ProductivityApp() {
                               <span className={`text-[12px] leading-tight ${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
                               {task.completedAt && <span className={`text-[8px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Finished: {task.completedAt}</span>}
                           </div>
-                          <button onClick={() => toggleTask(project.id, task.id)} className="text-[9px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity whitespace-nowrap">
-                            {task.completed ? 'UNDO' : 'DONE'}
-                          </button>
+                          {canEdit && (
+                            <button onClick={() => toggleTask(project.id, project.tasks, task.id)} className="text-[9px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity whitespace-nowrap">
+                              {task.completed ? 'UNDO' : 'DONE'}
+                            </button>
+                          )}
                         </div>
                       ))}
-                      {activeTab === 'active' && <input placeholder="Add item..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, e.currentTarget.value); e.currentTarget.value = ''; } }} />}
+                      {activeTab === 'active' && canEdit && <input placeholder="Add item..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, project.tasks, e.currentTarget.value); e.currentTarget.value = ''; } }} />}
                     </div>
                   )}
                 </div>
