@@ -4,12 +4,21 @@ import { useState, useEffect } from 'react';
 import { initializeApp, getApps } from "firebase/app";
 import { 
   getFirestore, doc, onSnapshot, setDoc, collection, 
-  query, where, deleteDoc, updateDoc, arrayUnion, orderBy 
+  query, where, deleteDoc, updateDoc, arrayUnion, orderBy, writeBatch 
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, 
   GoogleAuthProvider, signInWithPopup, signOut 
 } from "firebase/auth";
+
+// DnD Kit
+import {
+  DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent
+} from '@dnd-kit/core';
+import {
+  arrayMove, SortableContext, sortableKeyboardCoordinates, rectSortingStrategy, useSortable
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDhHHzBrFUWyudcVDfwKliG5gM10WmDIFM",
@@ -25,320 +34,180 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0
 const db = getFirestore(app);
 const auth = getAuth(app);
 
-// ... Interfaces remain the same ...
-interface Task { id: string; text: string; completed: boolean; completedAt?: string; }
-interface SharedUser { email: string; role: 'edit' | 'view'; }
-interface Project { 
-  id: string; 
-  name: string; 
-  tasks: Task[]; 
-  bgColor?: string; 
-  isCompleted?: boolean; 
-  ownerId: string;
-  allowedEmails: string[];
-  sharedWith?: SharedUser[];
-  order: number;
-}
+// Types
 type Accent = 'gray' | 'indigo' | 'violet' | 'fuchsia' | 'rose' | 'amber' | 'emerald' | 'teal' | 'cyan' | 'lime';
-
-const ACCENT_CLASS_MAP: Record<Accent, { bg: string; dot: string; bar: string }> = {
-  gray: { bg: 'bg-zinc-600', dot: 'bg-zinc-600', bar: 'bg-zinc-600' },
-  indigo: { bg: 'bg-indigo-600', dot: 'bg-indigo-600', bar: 'bg-indigo-600' },
-  violet: { bg: 'bg-violet-600', dot: 'bg-violet-600', bar: 'bg-violet-600' },
-  fuchsia: { bg: 'bg-fuchsia-600', dot: 'bg-fuchsia-600', bar: 'bg-fuchsia-600' },
-  rose: { bg: 'bg-rose-600', dot: 'bg-rose-600', bar: 'bg-rose-600' },
-  amber: { bg: 'bg-amber-600', dot: 'bg-amber-600', bar: 'bg-amber-600' },
-  emerald: { bg: 'bg-emerald-600', dot: 'bg-emerald-600', bar: 'bg-emerald-600' },
-  teal: { bg: 'bg-teal-600', dot: 'bg-teal-600', bar: 'bg-teal-600' },
-  cyan: { bg: 'bg-cyan-600', dot: 'bg-cyan-600', bar: 'bg-cyan-600' },
-  lime: { bg: 'bg-lime-600', dot: 'bg-lime-600', bar: 'bg-lime-600' }
+const ACCENT_CLASS_MAP: Record<Accent, string> = {
+  gray: 'bg-zinc-600', indigo: 'bg-indigo-600', violet: 'bg-violet-600', fuchsia: 'bg-fuchsia-600',
+  rose: 'bg-rose-600', amber: 'bg-amber-600', emerald: 'bg-emerald-600', teal: 'bg-teal-600',
+  cyan: 'bg-cyan-600', lime: 'bg-lime-600'
 };
+
+function SortableProject({ id, children }: { id: string, children: (props: any) => React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = { transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 50 : 'auto', opacity: isDragging ? 0.6 : 1 };
+  return <div ref={setNodeRef} style={style}>{children({ attributes, listeners })}</div>;
+}
+
+interface Task { id: string; text: string; completed: boolean; }
+interface Project { 
+  id: string; name: string; tasks: Task[]; bgColor?: string; 
+  isCompleted?: boolean; ownerId: string; allowedEmails: string[]; sharedWith?: {email: string}[]; order: number; 
+}
 
 const getContrastColor = (hex?: string) => {
   if (!hex) return 'text-zinc-900 dark:text-zinc-100';
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   const brightness = (r * 299 + g * 587 + b * 114) / 1000;
   return brightness > 128 ? 'text-zinc-900' : 'text-white';
 };
 
 export default function ProductivityApp() {
-  // 1. ADDED MOUNTED STATE
   const [mounted, setMounted] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [isCompact, setIsCompact] = useState<boolean>(false);
   const [isDark, setIsDark] = useState<boolean>(true);
   const [accent, setAccent] = useState<Accent>('indigo');
-  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
 
   useEffect(() => {
-    // 2. TRIGGER MOUNTED ON LOAD
     setMounted(true);
-    
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
-        setUserId(user.uid);
-        setUserEmail(user.email);
-        const q = query(
-          collection(db, "projects"), 
-          where("allowedEmails", "array-contains", user.email || user.uid),
-          orderBy("order", "asc")
-        );
-        const unsubProjects = onSnapshot(q, (snapshot) => {
-          setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
-        });
-        const unsubSettings = onSnapshot(doc(db, "users", user.uid), (doc) => {
-          if (doc.exists() && doc.data().accent) setAccent(doc.data().accent);
-        });
-        return () => { unsubProjects(); unsubSettings(); };
-      } else {
-        signInAnonymously(auth);
-      }
+        setUserId(user.uid); setUserEmail(user.email); setUserPhoto(user.photoURL);
+        const q = query(collection(db, "projects"), where("allowedEmails", "array-contains", user.email || user.uid), orderBy("order", "asc"));
+        const unsubProjects = onSnapshot(q, (s) => setProjects(s.docs.map(d => ({ id: d.id, ...d.data() } as Project))));
+        
+        // Load user accent preference
+        onSnapshot(doc(db, "users", user.uid), (d) => { if (d.exists() && d.data().accent) setAccent(d.data().accent); });
+        
+        return () => unsubProjects();
+      } else { signInAnonymously(auth); }
     });
     return () => unsubAuth();
   }, []);
 
-  // 3. SAFETY GATE FOR HYDRATION
-  if (!mounted) {
-    return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-zinc-500 font-mono text-[10px] uppercase tracking-widest">Initialising Vapor...</div>;
-  }
-
-  // ... Logic functions (handleGoogleLogin, addProject, etc.) remain exactly the same ...
-  const handleGoogleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    try { await signInWithPopup(auth, provider); } catch (err) { console.error(err); }
-  };
-  const handleLogout = () => signOut(auth);
   const updateAccent = async (newAccent: Accent) => {
     setAccent(newAccent);
     if (userId) await setDoc(doc(db, "users", userId), { accent: newAccent }, { merge: true });
   };
+
   const addProject = async () => {
     if (!newProjectName.trim() || !userId) return;
-    const id = crypto.randomUUID();
-    const newProj = {
-      name: newProjectName.trim(),
-      tasks: [],
-      bgColor: '',
-      isCompleted: false,
-      ownerId: userId,
-      allowedEmails: [userEmail || userId],
-      sharedWith: [],
-      order: projects.length
-    };
-    await setDoc(doc(db, "projects", id), newProj);
+    const id = Math.random().toString(36).substring(7);
+    await setDoc(doc(db, "projects", id), { name: newProjectName.trim(), tasks: [], bgColor: '', isCompleted: false, ownerId: userId, allowedEmails: [userEmail || userId], sharedWith: [], order: projects.length });
     setNewProjectName('');
   };
-  const reorderProject = async (index: number, direction: 'up' | 'down') => {
-    const newIndex = direction === 'up' ? index - 1 : index + 1;
-    if (newIndex < 0 || newIndex >= projects.length) return;
-    const p1 = projects[index];
-    const p2 = projects[newIndex];
-    await updateDoc(doc(db, "projects", p1.id), { order: p2.order });
-    await updateDoc(doc(db, "projects", p2.id), { order: p1.order });
-  };
-  const shareProject = async (projectId: string) => {
-    const email = prompt("Enter the email to share with:");
-    if (!email) return;
-    const role = confirm("Give EDIT access? (Cancel for VIEW ONLY)") ? 'edit' : 'view';
-    await updateDoc(doc(db, "projects", projectId), {
-      sharedWith: arrayUnion({ email: email.toLowerCase().trim(), role }),
-      allowedEmails: arrayUnion(email.toLowerCase().trim())
-    });
-  };
-  const deleteProject = async (projectId: string) => {
-    if (!confirm("Delete this list?")) return;
-    await deleteDoc(doc(db, "projects", projectId));
-  };
-  const toggleProjectComplete = async (projectId: string, current: boolean) => {
-    await updateDoc(doc(db, "projects", projectId), { isCompleted: !current });
-  };
-  const updateProjectColor = async (projectId: string, color: string) => {
-    await updateDoc(doc(db, "projects", projectId), { bgColor: color });
-  };
-  const addTask = async (projectId: string, projectTasks: Task[], text: string) => {
-    if (!text.trim()) return;
-    const updatedTasks = [...projectTasks, { id: crypto.randomUUID(), text: text.trim(), completed: false }];
-    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
-  };
-  const editTaskText = async (projectId: string, projectTasks: Task[], taskId: string, newText: string) => {
-    const updatedTasks = projectTasks.map(t => t.id === taskId ? { ...t, text: newText } : t);
-    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
-    setEditingTaskId(null);
-  };
-  const toggleTask = async (projectId: string, projectTasks: Task[], taskId: string) => {
-    const updatedTasks = projectTasks.map(t => {
-      if (t.id !== taskId) return t;
-      const isCompleting = !t.completed;
-      const task = { ...t, completed: isCompleting };
-      if (isCompleting) task.completedAt = new Date().toLocaleDateString();
-      else delete task.completedAt;
-      return task;
-    });
-    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = projects.findIndex((p) => p.id === active.id), newIndex = projects.findIndex((p) => p.id === over.id);
+    const reordered = arrayMove(projects, oldIndex, newIndex);
+    setProjects(reordered);
+    const batch = writeBatch(db);
+    reordered.forEach((p, idx) => batch.update(doc(db, "projects", p.id), { order: idx }));
+    await batch.commit();
   };
 
-  const visibleProjects = projects.filter(p => {
-    const matchesTab = activeTab === 'active' ? !p.isCompleted : (p.isCompleted || p.tasks.some(t => t.completed));
-    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                          p.tasks.some(t => t.text.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesTab && matchesSearch;
-  });
+  if (!mounted) return null;
 
   return (
-    <div className={`min-h-screen transition-colors duration-300 ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
-      {/* HEADER SECTION */}
-      <div className={`${ACCENT_CLASS_MAP[accent].bg} text-white`}>
-        <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <h1 className="text-lg font-semibold tracking-tight">Vapor Lists</h1>
-            {userEmail ? (
-              <button onClick={handleLogout} className="group flex items-center gap-2 text-[10px] bg-white/10 px-3 py-1.5 rounded-md border border-white/10">
-                <span className="opacity-70 group-hover:hidden uppercase tracking-widest">{userEmail}</span>
-                <span className="hidden group-hover:inline uppercase tracking-widest font-bold text-rose-300">Sign Out</span>
-              </button>
-            ) : (
-              <button onClick={handleGoogleLogin} className="bg-white text-zinc-700 px-3 py-1.5 rounded-md text-[10px] font-bold">Sign in with Google</button>
-            )}
-          </div>
-          <div className="flex items-center gap-4">
-            <button onClick={() => setIsDark(!isDark)} className="text-xl">{isDark ? '☀️' : '🌙'}</button>
-            <div className="flex gap-1.5">
-              {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
-                <button key={color} onClick={() => updateAccent(color)} className={`w-4 h-4 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-60'} ${ACCENT_CLASS_MAP[color].dot}`} />
-              ))}
+    <div className={`min-h-screen ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`} style={{ fontFamily: 'Arial, sans-serif' }}>
+      {/* VAPOR HEADER WITH THEME PICKER */}
+      <div className={`${ACCENT_CLASS_MAP[accent]} text-white px-6 py-2 flex justify-between items-center shadow-md`}>
+        <div className="flex items-center gap-4">
+          <h1 className="text-lg font-bold italic uppercase tracking-tighter">Vapor</h1>
+          {userEmail && (
+            <div className="flex items-center gap-2 bg-black/20 px-2 py-1 rounded-full border border-white/10">
+              {userPhoto ? <img src={userPhoto} className="w-5 h-5 rounded-full" /> : <div className="w-5 h-5 rounded-full bg-zinc-700 flex items-center justify-center text-[8px]">{userEmail[0]}</div>}
+              <span className="text-[9px] font-bold uppercase">{userEmail.split('@')[0]}</span>
+              <button onClick={() => signOut(auth)} className="text-[8px] font-bold text-rose-300 ml-1">EXIT</button>
             </div>
+          )}
+        </div>
+        
+        <div className="flex items-center gap-4">
+          {/* THEME COLOR PICKER */}
+          <div className="flex gap-1.5 bg-black/10 p-1 rounded-full border border-white/10">
+            {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
+              <button key={color} onClick={() => updateAccent(color)} className={`w-3 h-3 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-50'} ${ACCENT_CLASS_MAP[color]} transition-all`} />
+            ))}
           </div>
+          <button onClick={() => setIsDark(!isDark)} className="text-sm">{isDark ? '☀️' : '🌙'}</button>
         </div>
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
-        {/* NAV BAR */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+        {/* UTILITY ROW: TABS & SEARCH/ADD */}
+        <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-8">
           <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
-            <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-xs font-semibold rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
-            <button onClick={() => setActiveTab('completed')} className={`px-4 py-1.5 text-xs font-semibold rounded-md ${activeTab === 'completed' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Archive</button>
+            <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
+            <button onClick={() => setActiveTab('completed')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md ${activeTab === 'completed' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Archive</button>
           </div>
-          <div className="flex items-center gap-4 text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-            <button onClick={() => setIsCompact(!isCompact)}>{isCompact ? 'Comfortable' : 'Compact'}</button>
-            <button onClick={() => setCollapsed(Object.fromEntries(projects.map(p => [p.id, true])))}>Collapse All</button>
-            <button onClick={() => setCollapsed({})}>Show All</button>
+          
+          <div className="flex gap-3 w-full md:w-auto">
+            <div className="relative">
+              <span className="absolute left-3 top-2 text-[10px] opacity-30">🔍</span>
+              <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="SEARCH..." className="pl-8 pr-3 py-1.5 text-[11px] font-bold rounded-lg border-2 border-zinc-200 dark:border-zinc-800 bg-transparent outline-none w-full md:w-40" />
+            </div>
+            <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="NEW LIST..." className="px-3 py-1.5 text-[11px] font-bold rounded-lg border-2 border-zinc-200 dark:border-zinc-800 bg-transparent outline-none w-full md:w-40" />
+            <button onClick={addProject} className={`${ACCENT_CLASS_MAP[accent]} px-4 py-1.5 rounded-lg text-[10px] font-bold text-white shadow-lg`}>ADD</button>
           </div>
         </div>
 
-        {/* SEARCH & ADD */}
-        <div className="flex flex-col md:flex-row gap-3 max-w-3xl mb-10">
-          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-[2] px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none" />
-          <div className="flex-1 relative">
-             <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search..." className="w-full px-4 py-2 pl-9 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none" />
-             <span className="absolute left-3 top-2.5 text-xs opacity-40">🔍</span>
-          </div>
-          <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white shadow-sm ${ACCENT_CLASS_MAP[accent].bg}`}>Add List</button>
-        </div>
+        {/* GRID LAYOUT */}
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={projects.map(p => p.id)} strategy={rectSortingStrategy}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 items-start">
+              {projects.filter(p => (activeTab === 'active' ? !p.isCompleted : p.isCompleted) && p.name.toLowerCase().includes(searchQuery.toLowerCase())).map((project) => {
+                const contrast = getContrastColor(project.bgColor);
+                return (
+                  <SortableProject key={project.id} id={project.id}>
+                    {({ attributes, listeners }: any) => (
+                      <div style={{ backgroundColor: project.bgColor || undefined }} className={`group border-2 border-zinc-100 dark:border-zinc-800/50 rounded-xl transition-all ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} p-3`}>
+                        <div className="flex justify-between items-center mb-3">
+                          <div className="flex flex-col gap-1 truncate w-[60%]">
+                            <span {...attributes} {...listeners} className={`cursor-grab active:cursor-grabbing uppercase text-[12px] font-bold truncate ${contrast}`}>{project.name}</span>
+                            <div className="flex -space-x-1">
+                              {project.sharedWith?.map((sw, i) => <div key={i} className="w-3.5 h-3.5 rounded-full bg-zinc-700 border border-black/10 text-[6px] flex items-center justify-center text-white" title={sw.email}>{sw.email[0].toUpperCase()}</div>)}
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => {const e = prompt("Email:"); if(e) updateDoc(doc(db,"projects",project.id),{allowedEmails:arrayUnion(e.toLowerCase()),sharedWith:arrayUnion({email:e.toLowerCase()})})}} className={`text-[10px] ${contrast}`}>👤</button>
+                            {/* PAINT ICON FIXED */}
+                            <div className="relative w-4 h-4 flex items-center justify-center">
+                               <span className={`text-[11px] ${contrast}`}>🎨</span>
+                               <input type="color" className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" onChange={(e) => updateDoc(doc(db, "projects", project.id), { bgColor: e.target.value })} />
+                            </div>
+                            <button onClick={() => updateDoc(doc(db, "projects", project.id), { isCompleted: !project.isCompleted })} className={`text-[11px] ${contrast}`}>✅</button>
+                            <button onClick={() => confirm("Delete?") && deleteDoc(doc(db,"projects",project.id))} className="text-rose-500 text-[11px]">🗑️</button>
+                          </div>
+                        </div>
 
-        {/* LIST GRID */}
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 items-start">
-          {visibleProjects.map((project, idx) => {
-              const isCollapsed = collapsed[project.id];
-              const userRole = project.ownerId === userId ? 'edit' : (project.sharedWith?.find(u => u.email === userEmail)?.role || 'view');
-              const canEdit = userRole === 'edit';
-              const tasks = project.tasks.filter(t => (activeTab === 'active' ? !t.completed : t.completed));
-              const progress = project.tasks.length ? (project.tasks.filter(t => t.completed).length / project.tasks.length) * 100 : 0;
-              const contrastClass = getContrastColor(project.bgColor);
-
-              return (
-                <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all shadow-sm ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
-                  <div className="flex justify-between items-center text-sm font-bold mb-2">
-                    <div className="flex items-center gap-2 truncate">
-                      <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>
-                        {project.name} {project.ownerId !== userId && '🤝'}
-                      </span>
-                      {/* SHARED AVATARS */}
-                      {project.sharedWith && project.sharedWith.length > 0 && (
-                        <div className="flex -space-x-2 relative ml-1">
-                          {project.sharedWith.map((sw, i) => (
-                            <div key={i} className={`w-5 h-5 rounded-full border-2 border-zinc-900 flex items-center justify-center text-[8px] font-bold bg-zinc-700 text-white cursor-help shadow-sm`} title={sw.email}>
-                              {sw.email[0].toUpperCase()}
+                        <div className="space-y-1">
+                          {project.tasks.map((task) => (
+                            <div key={task.id} className={`flex items-center justify-between rounded-md p-1.5 ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'}`}>
+                              <span className={`text-[10px] font-bold leading-tight flex-grow pr-2 ${task.completed ? 'line-through opacity-30' : contrast}`}>{task.text}</span>
+                              <button onClick={() => updateDoc(doc(db,"projects",project.id),{tasks:project.tasks.map(t=>t.id===task.id?{...t,completed:!t.completed}:t)})} className={`text-[8px] font-bold ${task.completed ? 'text-zinc-400' : 'text-emerald-500'}`}>{task.completed ? 'UNDO' : 'DONE'}</button>
                             </div>
                           ))}
+                          {activeTab === 'active' && <input placeholder="ADD..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1 text-[9px] font-bold ${contrast} outline-none opacity-40 focus:opacity-100`} onKeyDown={e => { if (e.key === 'Enter') { updateDoc(doc(db,"projects",project.id),{tasks:[...project.tasks,{id:Math.random().toString(36).substring(7),text:e.currentTarget.value,completed:false}]}); e.currentTarget.value = ''; } }} />}
                         </div>
-                      )}
-                    </div>
-                    
-                    {/* CONTROLS */}
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      {canEdit && (
-                        <>
-                          <button onClick={() => reorderProject(idx, 'up')} className={`p-1 text-[10px] ${contrastClass}`}>↑</button>
-                          <button onClick={() => reorderProject(idx, 'down')} className={`p-1 text-[10px] ${contrastClass}`}>↓</button>
-                          <button onClick={() => shareProject(project.id)} className={`p-1 text-xs ${contrastClass}`}>👤</button>
-                          <div className="relative h-6 w-6">
-                            <span className="absolute inset-0 flex items-center justify-center text-[10px]">🎨</span>
-                            <input type="color" onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                          </div>
-                          <button onClick={() => toggleProjectComplete(project.id, !!project.isCompleted)} className={`p-1 text-[10px] ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
-                          <button onClick={() => deleteProject(project.id)} className="p-1 text-rose-400">🗑️</button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* PROGRESS BAR */}
-                  <div className="w-full h-[2px] bg-black/10 dark:bg-white/10 mb-4 rounded-full overflow-hidden">
-                      <div className={`h-full ${ACCENT_CLASS_MAP[accent].bg}`} style={{ width: `${progress}%` }} />
-                  </div>
-
-                  {/* TASKS */}
-                  {!isCollapsed && (
-                    <div className="space-y-1.5">
-                      {tasks.map((task) => (
-                        <div key={task.id} className={`flex items-center justify-between rounded-lg group/task ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'} ${isCompact ? 'px-2 py-1' : 'px-3 py-1.5'}`}>
-                          <div className="flex flex-col pr-2 flex-grow overflow-hidden">
-                              {editingTaskId === task.id ? (
-                                <input 
-                                  autoFocus 
-                                  className={`bg-transparent outline-none border-b border-zinc-400 text-[12px] ${contrastClass}`}
-                                  defaultValue={task.text}
-                                  onBlur={(e) => editTaskText(project.id, project.tasks, task.id, e.target.value)}
-                                  onKeyDown={(e) => e.key === 'Enter' && editTaskText(project.id, project.tasks, task.id, e.currentTarget.value)}
-                                />
-                              ) : (
-                                <span 
-                                  onDoubleClick={() => canEdit && setEditingTaskId(task.id)}
-                                  className={`text-[12px] leading-tight select-none ${task.completed ? 'line-through opacity-40' : contrastClass}`}
-                                >
-                                  {task.text}
-                                </span>
-                              )}
-                              {task.completedAt && <span className={`text-[8px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Finished: {task.completedAt}</span>}
-                          </div>
-                          {canEdit && (
-                            <button onClick={() => toggleTask(project.id, project.tasks, task.id)} className="text-[9px] font-bold text-emerald-500 opacity-0 group-hover/task:opacity-100 transition-opacity whitespace-nowrap">
-                              {task.completed ? 'UNDO' : 'DONE'}
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                      {activeTab === 'active' && canEdit && (
-                        <input 
-                          placeholder="Add item..." 
-                          className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} 
-                          onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, project.tasks, e.currentTarget.value); e.currentTarget.value = ''; } }} 
-                        />
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-        </div>
+                      </div>
+                    )}
+                  </SortableProject>
+                );
+              })}
+            </div>
+          </SortableContext>
+        </DndContext>
       </div>
     </div>
   );
