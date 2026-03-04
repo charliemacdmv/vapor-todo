@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { initializeApp, getApps } from "firebase/app";
 import { 
   getFirestore, doc, onSnapshot, setDoc, collection, 
-  query, where, deleteDoc, updateDoc, arrayUnion 
+  query, where, deleteDoc, updateDoc, arrayUnion, orderBy 
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, 
@@ -25,6 +25,7 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0
 const db = getFirestore(app);
 const auth = getAuth(app);
 
+// ... Interfaces remain the same ...
 interface Task { id: string; text: string; completed: boolean; completedAt?: string; }
 interface SharedUser { email: string; role: 'edit' | 'view'; }
 interface Project { 
@@ -36,6 +37,7 @@ interface Project {
   ownerId: string;
   allowedEmails: string[];
   sharedWith?: SharedUser[];
+  order: number;
 }
 type Accent = 'gray' | 'indigo' | 'violet' | 'fuchsia' | 'rose' | 'amber' | 'emerald' | 'teal' | 'cyan' | 'lime';
 
@@ -62,7 +64,8 @@ const getContrastColor = (hex?: string) => {
 };
 
 export default function ProductivityApp() {
-  const [mounted, setMounted] = useState(false); // Fix for Hydration Error
+  // 1. ADDED MOUNTED STATE
+  const [mounted, setMounted] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -73,14 +76,21 @@ export default function ProductivityApp() {
   const [isCompact, setIsCompact] = useState<boolean>(false);
   const [isDark, setIsDark] = useState<boolean>(true);
   const [accent, setAccent] = useState<Accent>('indigo');
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 
   useEffect(() => {
+    // 2. TRIGGER MOUNTED ON LOAD
     setMounted(true);
+    
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid);
         setUserEmail(user.email);
-        const q = query(collection(db, "projects"), where("allowedEmails", "array-contains", user.email || user.uid));
+        const q = query(
+          collection(db, "projects"), 
+          where("allowedEmails", "array-contains", user.email || user.uid),
+          orderBy("order", "asc")
+        );
         const unsubProjects = onSnapshot(q, (snapshot) => {
           setProjects(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Project)));
         });
@@ -95,20 +105,21 @@ export default function ProductivityApp() {
     return () => unsubAuth();
   }, []);
 
-  if (!mounted) return <div className="min-h-screen bg-zinc-950" />;
+  // 3. SAFETY GATE FOR HYDRATION
+  if (!mounted) {
+    return <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-zinc-500 font-mono text-[10px] uppercase tracking-widest">Initialising Vapor...</div>;
+  }
 
+  // ... Logic functions (handleGoogleLogin, addProject, etc.) remain exactly the same ...
   const handleGoogleLogin = async () => {
     const provider = new GoogleAuthProvider();
     try { await signInWithPopup(auth, provider); } catch (err) { console.error(err); }
   };
-
   const handleLogout = () => signOut(auth);
-
   const updateAccent = async (newAccent: Accent) => {
     setAccent(newAccent);
     if (userId) await setDoc(doc(db, "users", userId), { accent: newAccent }, { merge: true });
   };
-
   const addProject = async () => {
     if (!newProjectName.trim() || !userId) return;
     const id = crypto.randomUUID();
@@ -119,12 +130,20 @@ export default function ProductivityApp() {
       isCompleted: false,
       ownerId: userId,
       allowedEmails: [userEmail || userId],
-      sharedWith: []
+      sharedWith: [],
+      order: projects.length
     };
     await setDoc(doc(db, "projects", id), newProj);
     setNewProjectName('');
   };
-
+  const reorderProject = async (index: number, direction: 'up' | 'down') => {
+    const newIndex = direction === 'up' ? index - 1 : index + 1;
+    if (newIndex < 0 || newIndex >= projects.length) return;
+    const p1 = projects[index];
+    const p2 = projects[newIndex];
+    await updateDoc(doc(db, "projects", p1.id), { order: p2.order });
+    await updateDoc(doc(db, "projects", p2.id), { order: p1.order });
+  };
   const shareProject = async (projectId: string) => {
     const email = prompt("Enter the email to share with:");
     if (!email) return;
@@ -134,26 +153,26 @@ export default function ProductivityApp() {
       allowedEmails: arrayUnion(email.toLowerCase().trim())
     });
   };
-
   const deleteProject = async (projectId: string) => {
     if (!confirm("Delete this list?")) return;
     await deleteDoc(doc(db, "projects", projectId));
   };
-
   const toggleProjectComplete = async (projectId: string, current: boolean) => {
     await updateDoc(doc(db, "projects", projectId), { isCompleted: !current });
   };
-
   const updateProjectColor = async (projectId: string, color: string) => {
     await updateDoc(doc(db, "projects", projectId), { bgColor: color });
   };
-
   const addTask = async (projectId: string, projectTasks: Task[], text: string) => {
     if (!text.trim()) return;
     const updatedTasks = [...projectTasks, { id: crypto.randomUUID(), text: text.trim(), completed: false }];
     await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
   };
-
+  const editTaskText = async (projectId: string, projectTasks: Task[], taskId: string, newText: string) => {
+    const updatedTasks = projectTasks.map(t => t.id === taskId ? { ...t, text: newText } : t);
+    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
+    setEditingTaskId(null);
+  };
   const toggleTask = async (projectId: string, projectTasks: Task[], taskId: string) => {
     const updatedTasks = projectTasks.map(t => {
       if (t.id !== taskId) return t;
@@ -175,6 +194,7 @@ export default function ProductivityApp() {
 
   return (
     <div className={`min-h-screen transition-colors duration-300 ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
+      {/* HEADER SECTION */}
       <div className={`${ACCENT_CLASS_MAP[accent].bg} text-white`}>
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -200,6 +220,7 @@ export default function ProductivityApp() {
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
+        {/* NAV BAR */}
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
           <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
             <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-xs font-semibold rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
@@ -212,8 +233,9 @@ export default function ProductivityApp() {
           </div>
         </div>
 
+        {/* SEARCH & ADD */}
         <div className="flex flex-col md:flex-row gap-3 max-w-3xl mb-10">
-          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-[2] px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none focus:ring-1 focus:ring-zinc-300" />
+          <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addProject()} placeholder="New list name..." className="flex-[2] px-4 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none" />
           <div className="flex-1 relative">
              <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search..." className="w-full px-4 py-2 pl-9 text-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 focus:outline-none" />
              <span className="absolute left-3 top-2.5 text-xs opacity-40">🔍</span>
@@ -221,8 +243,9 @@ export default function ProductivityApp() {
           <button onClick={addProject} className={`px-6 py-2 rounded-lg text-sm font-bold text-white shadow-sm ${ACCENT_CLASS_MAP[accent].bg}`}>Add List</button>
         </div>
 
+        {/* LIST GRID */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 items-start">
-          {visibleProjects.map((project) => {
+          {visibleProjects.map((project, idx) => {
               const isCollapsed = collapsed[project.id];
               const userRole = project.ownerId === userId ? 'edit' : (project.sharedWith?.find(u => u.email === userEmail)?.role || 'view');
               const canEdit = userRole === 'edit';
@@ -233,32 +256,67 @@ export default function ProductivityApp() {
               return (
                 <div key={project.id} style={{ backgroundColor: project.bgColor || undefined }} className={`group border border-zinc-200 dark:border-zinc-800 rounded-xl transition-all shadow-sm ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} ${isCompact ? 'p-3' : 'p-5'}`}>
                   <div className="flex justify-between items-center text-sm font-bold mb-2">
-                    <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>
-                      {project.name} {project.ownerId !== userId && '🤝'}
-                    </span>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-2 truncate">
+                      <span onClick={() => setCollapsed(prev => ({...prev, [project.id]: !isCollapsed}))} className={`cursor-pointer uppercase tracking-tight truncate ${contrastClass}`}>
+                        {project.name} {project.ownerId !== userId && '🤝'}
+                      </span>
+                      {/* SHARED AVATARS */}
+                      {project.sharedWith && project.sharedWith.length > 0 && (
+                        <div className="flex -space-x-2 relative ml-1">
+                          {project.sharedWith.map((sw, i) => (
+                            <div key={i} className={`w-5 h-5 rounded-full border-2 border-zinc-900 flex items-center justify-center text-[8px] font-bold bg-zinc-700 text-white cursor-help shadow-sm`} title={sw.email}>
+                              {sw.email[0].toUpperCase()}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* CONTROLS */}
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                       {canEdit && (
                         <>
-                          <button onClick={() => shareProject(project.id)} className={`p-1 text-xs ${contrastClass}`} title="Share">👤</button>
+                          <button onClick={() => reorderProject(idx, 'up')} className={`p-1 text-[10px] ${contrastClass}`}>↑</button>
+                          <button onClick={() => reorderProject(idx, 'down')} className={`p-1 text-[10px] ${contrastClass}`}>↓</button>
+                          <button onClick={() => shareProject(project.id)} className={`p-1 text-xs ${contrastClass}`}>👤</button>
                           <div className="relative h-6 w-6">
-                            <span className="absolute inset-0 flex items-center justify-center text-xs">🎨</span>
+                            <span className="absolute inset-0 flex items-center justify-center text-[10px]">🎨</span>
                             <input type="color" onChange={(e) => updateProjectColor(project.id, e.target.value)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                           </div>
-                          <button onClick={() => toggleProjectComplete(project.id, !!project.isCompleted)} className={`p-1.5 rounded hover:bg-black/5 ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
-                          <button onClick={() => deleteProject(project.id)} className="p-1.5 text-rose-400">🗑️</button>
+                          <button onClick={() => toggleProjectComplete(project.id, !!project.isCompleted)} className={`p-1 text-[10px] ${contrastClass}`}>{project.isCompleted ? '↩️' : '✅'}</button>
+                          <button onClick={() => deleteProject(project.id)} className="p-1 text-rose-400">🗑️</button>
                         </>
                       )}
                     </div>
                   </div>
+
+                  {/* PROGRESS BAR */}
                   <div className="w-full h-[2px] bg-black/10 dark:bg-white/10 mb-4 rounded-full overflow-hidden">
                       <div className={`h-full ${ACCENT_CLASS_MAP[accent].bg}`} style={{ width: `${progress}%` }} />
                   </div>
+
+                  {/* TASKS */}
                   {!isCollapsed && (
                     <div className="space-y-1.5">
                       {tasks.map((task) => (
                         <div key={task.id} className={`flex items-center justify-between rounded-lg group/task ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'} ${isCompact ? 'px-2 py-1' : 'px-3 py-1.5'}`}>
-                          <div className="flex flex-col pr-2 overflow-hidden">
-                              <span className={`text-[12px] leading-tight ${task.completed ? 'line-through opacity-40' : contrastClass}`}>{task.text}</span>
+                          <div className="flex flex-col pr-2 flex-grow overflow-hidden">
+                              {editingTaskId === task.id ? (
+                                <input 
+                                  autoFocus 
+                                  className={`bg-transparent outline-none border-b border-zinc-400 text-[12px] ${contrastClass}`}
+                                  defaultValue={task.text}
+                                  onBlur={(e) => editTaskText(project.id, project.tasks, task.id, e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && editTaskText(project.id, project.tasks, task.id, e.currentTarget.value)}
+                                />
+                              ) : (
+                                <span 
+                                  onDoubleClick={() => canEdit && setEditingTaskId(task.id)}
+                                  className={`text-[12px] leading-tight select-none ${task.completed ? 'line-through opacity-40' : contrastClass}`}
+                                >
+                                  {task.text}
+                                </span>
+                              )}
                               {task.completedAt && <span className={`text-[8px] font-bold opacity-30 mt-0.5 ${contrastClass}`}>Finished: {task.completedAt}</span>}
                           </div>
                           {canEdit && (
@@ -268,7 +326,13 @@ export default function ProductivityApp() {
                           )}
                         </div>
                       ))}
-                      {activeTab === 'active' && canEdit && <input placeholder="Add item..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, project.tasks, e.currentTarget.value); e.currentTarget.value = ''; } }} />}
+                      {activeTab === 'active' && canEdit && (
+                        <input 
+                          placeholder="Add item..." 
+                          className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1.5 text-[11px] ${contrastClass} placeholder:opacity-40`} 
+                          onKeyDown={e => { if (e.key === 'Enter') { addTask(project.id, project.tasks, e.currentTarget.value); e.currentTarget.value = ''; } }} 
+                        />
+                      )}
                     </div>
                   )}
                 </div>
@@ -279,4 +343,3 @@ export default function ProductivityApp() {
     </div>
   );
 }
-// Force update: 2026-03-03
