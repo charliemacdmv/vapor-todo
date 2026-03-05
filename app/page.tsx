@@ -72,6 +72,7 @@ export default function ProductivityApp() {
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
   const [isDark, setIsDark] = useState<boolean>(true);
   const [accent, setAccent] = useState<Accent>('indigo');
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
 
@@ -82,10 +83,7 @@ export default function ProductivityApp() {
         setUserId(user.uid); setUserEmail(user.email); setUserPhoto(user.photoURL);
         const q = query(collection(db, "projects"), where("allowedEmails", "array-contains", user.email || user.uid), orderBy("order", "asc"));
         const unsubProjects = onSnapshot(q, (s) => setProjects(s.docs.map(d => ({ id: d.id, ...d.data() } as Project))));
-        
-        // Load user accent preference
         onSnapshot(doc(db, "users", user.uid), (d) => { if (d.exists() && d.data().accent) setAccent(d.data().accent); });
-        
         return () => unsubProjects();
       } else { signInAnonymously(auth); }
     });
@@ -115,11 +113,17 @@ export default function ProductivityApp() {
     await batch.commit();
   };
 
+  const saveTaskEdit = async (projectId: string, tasks: Task[], taskId: string, newText: string) => {
+    setEditingTaskId(null);
+    if (!newText.trim()) return;
+    const updatedTasks = tasks.map(t => t.id === taskId ? { ...t, text: newText.trim() } : t);
+    await updateDoc(doc(db, "projects", projectId), { tasks: updatedTasks });
+  };
+
   if (!mounted) return null;
 
   return (
     <div className={`min-h-screen ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`} style={{ fontFamily: 'Arial, sans-serif' }}>
-      {/* VAPOR HEADER WITH THEME PICKER */}
       <div className={`${ACCENT_CLASS_MAP[accent]} text-white px-6 py-2 flex justify-between items-center shadow-md`}>
         <div className="flex items-center gap-4">
           <h1 className="text-lg font-bold italic uppercase tracking-tighter">Vapor</h1>
@@ -131,9 +135,7 @@ export default function ProductivityApp() {
             </div>
           )}
         </div>
-        
         <div className="flex items-center gap-4">
-          {/* THEME COLOR PICKER */}
           <div className="flex gap-1.5 bg-black/10 p-1 rounded-full border border-white/10">
             {(Object.keys(ACCENT_CLASS_MAP) as Accent[]).map(color => (
               <button key={color} onClick={() => updateAccent(color)} className={`w-3 h-3 rounded-full border ${accent === color ? 'border-white scale-110' : 'border-transparent opacity-50'} ${ACCENT_CLASS_MAP[color]} transition-all`} />
@@ -144,13 +146,11 @@ export default function ProductivityApp() {
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
-        {/* UTILITY ROW: TABS & SEARCH/ADD */}
         <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-8">
           <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
             <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
             <button onClick={() => setActiveTab('completed')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md ${activeTab === 'completed' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Archive</button>
           </div>
-          
           <div className="flex gap-3 w-full md:w-auto">
             <div className="relative">
               <span className="absolute left-3 top-2 text-[10px] opacity-30">🔍</span>
@@ -161,7 +161,6 @@ export default function ProductivityApp() {
           </div>
         </div>
 
-        {/* GRID LAYOUT */}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={projects.map(p => p.id)} strategy={rectSortingStrategy}>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 items-start">
@@ -173,15 +172,14 @@ export default function ProductivityApp() {
                       <div style={{ backgroundColor: project.bgColor || undefined }} className={`group border-2 border-zinc-100 dark:border-zinc-800/50 rounded-xl transition-all ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} p-3`}>
                         <div className="flex justify-between items-center mb-3">
                           <div className="flex flex-col gap-1 truncate w-[60%]">
-                            <span {...attributes} {...listeners} className={`cursor-grab active:cursor-grabbing uppercase text-[12px] font-bold truncate ${contrast}`}>{project.name}</span>
+                            {/* Bumped to 14px */}
+                            <span {...attributes} {...listeners} className={`cursor-grab active:cursor-grabbing uppercase text-[14px] font-bold truncate ${contrast}`}>{project.name}</span>
                             <div className="flex -space-x-1">
                               {project.sharedWith?.map((sw, i) => <div key={i} className="w-3.5 h-3.5 rounded-full bg-zinc-700 border border-black/10 text-[6px] flex items-center justify-center text-white" title={sw.email}>{sw.email[0].toUpperCase()}</div>)}
                             </div>
                           </div>
-                          
                           <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <button onClick={() => {const e = prompt("Email:"); if(e) updateDoc(doc(db,"projects",project.id),{allowedEmails:arrayUnion(e.toLowerCase()),sharedWith:arrayUnion({email:e.toLowerCase()})})}} className={`text-[10px] ${contrast}`}>👤</button>
-                            {/* PAINT ICON FIXED */}
                             <div className="relative w-4 h-4 flex items-center justify-center">
                                <span className={`text-[11px] ${contrast}`}>🎨</span>
                                <input type="color" className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" onChange={(e) => updateDoc(doc(db, "projects", project.id), { bgColor: e.target.value })} />
@@ -192,13 +190,30 @@ export default function ProductivityApp() {
                         </div>
 
                         <div className="space-y-1">
-                          {project.tasks.map((task) => (
+                          {project.tasks.filter(t => activeTab === 'completed' ? t.completed : !t.completed).map((task) => (
                             <div key={task.id} className={`flex items-center justify-between rounded-md p-1.5 ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'}`}>
-                              <span className={`text-[10px] font-bold leading-tight flex-grow pr-2 ${task.completed ? 'line-through opacity-30' : contrast}`}>{task.text}</span>
-                              <button onClick={() => updateDoc(doc(db,"projects",project.id),{tasks:project.tasks.map(t=>t.id===task.id?{...t,completed:!t.completed}:t)})} className={`text-[8px] font-bold ${task.completed ? 'text-zinc-400' : 'text-emerald-500'}`}>{task.completed ? 'UNDO' : 'DONE'}</button>
+                              {editingTaskId === task.id ? (
+                                <input 
+                                  autoFocus 
+                                  /* Bumped to 12px */
+                                  className={`text-[12px] font-bold bg-transparent border-none outline-none flex-grow ${contrast}`}
+                                  defaultValue={task.text}
+                                  onBlur={(e) => saveTaskEdit(project.id, project.tasks, task.id, e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && saveTaskEdit(project.id, project.tasks, task.id, e.currentTarget.value)}
+                                />
+                              ) : (
+                                <span 
+                                  onClick={() => setEditingTaskId(task.id)}
+                                  /* Bumped to 12px */
+                                  className={`text-[12px] font-bold leading-tight flex-grow pr-2 cursor-text ${task.completed ? 'line-through opacity-30' : contrast}`}
+                                >
+                                  {task.text}
+                                </span>
+                              )}
+                              <button onClick={() => updateDoc(doc(db,"projects",project.id),{tasks:project.tasks.map(t=>t.id===task.id?{...t,completed:!t.completed}:t)})} className={`text-[9px] font-bold ${task.completed ? 'text-zinc-400' : 'text-emerald-500'}`}>{task.completed ? 'UNDO' : 'DONE'}</button>
                             </div>
                           ))}
-                          {activeTab === 'active' && <input placeholder="ADD..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1 text-[9px] font-bold ${contrast} outline-none opacity-40 focus:opacity-100`} onKeyDown={e => { if (e.key === 'Enter') { updateDoc(doc(db,"projects",project.id),{tasks:[...project.tasks,{id:Math.random().toString(36).substring(7),text:e.currentTarget.value,completed:false}]}); e.currentTarget.value = ''; } }} />}
+                          {activeTab === 'active' && <input placeholder="ADD..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1 text-[11px] font-bold ${contrast} outline-none opacity-40 focus:opacity-100`} onKeyDown={e => { if (e.key === 'Enter') { updateDoc(doc(db,"projects",project.id),{tasks:[...project.tasks,{id:Math.random().toString(36).substring(7),text:e.currentTarget.value,completed:false}]}); e.currentTarget.value = ''; } }} />}
                         </div>
                       </div>
                     )}
