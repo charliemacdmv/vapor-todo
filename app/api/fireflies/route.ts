@@ -1,56 +1,47 @@
 import { NextResponse } from 'next/server';
-import { getFirestore, doc, setDoc } from "firebase/firestore";
-import { initializeApp, getApps } from "firebase/app";
+import * as admin from 'firebase-admin';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyDhHHzBrFUWyudcVDfwKliG5gM10WmDIFM",
-  authDomain: "vapor-todo-list.firebaseapp.com",
-  projectId: "vapor-todo-list",
-  storageBucket: "vapor-todo-list.firebasestorage.app",
-  messagingSenderId: "996487428121",
-  appId: "1:996487428121:web:ebab0c6fb09ec11d815288",
-};
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    }),
+  });
+}
 
-// Initialize Firebase
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-const db = getFirestore(app);
-
-// Simple ID generator to avoid the 'crypto' unknown error
-const generateId = () => Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+const db = admin.firestore();
 
 export async function POST(request: Request) {
   try {
-    const data = await request.json();
-
-    // 1. Naming the List: Prefixes with a calendar icon and converts to Uppercase
-    // Fireflies usually sends 'title' or 'meeting_title'
-    const rawTitle = data.title || data.meeting_title || "New Meeting Note";
-    const listName = `📅 ${rawTitle.toUpperCase()}`;
+    const body = await request.json();
     
-    // 2. Generating the Tasks
-    // Fireflies sends 'action_items' as an array of strings
-    const actionItems = data.action_items || [];
-    const tasks = actionItems.map((item: string) => ({
-      id: generateId(),
-      text: item,
-      completed: false
-    }));
+    // Fireflies sends 'title' and 'action_items'
+    const title = body.title || "New Meeting";
+    const action_items = body.action_items || [];
 
-    // 3. Save to Firestore
-    const projectId = generateId();
-    await setDoc(doc(db, "projects", projectId), {
-      name: listName,
-      tasks: tasks,
-      bgColor: '#1e293b', // Slate background for meeting notes
+    const MY_EMAIL = "charliemacdmv@gmail.com"; // MUST BE YOUR LOGIN EMAIL
+
+    const listId = Math.random().toString(36).substring(7);
+    
+    await db.collection('projects').doc(listId).set({
+      name: `📅 ${title.toUpperCase()}`,
+      tasks: action_items.map((text: string) => ({
+        id: Math.random().toString(36).substring(7),
+        text,
+        completed: false
+      })),
+      bgColor: '#1e293b',
       isCompleted: false,
-      ownerId: "fireflies-integration",
-      allowedEmails: ["charles.mchenry@automatedrt.com"], // IMPORTANT: Put your login email here!
-      order: -1 // This forces it to the top of your list
+      ownerId: "fireflies-sync",
+      allowedEmails: [MY_EMAIL],
+      sharedWith: [],
+      order: -1
     });
 
-    return NextResponse.json({ success: true, listId: projectId });
+    return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error("Fireflies Webhook Error:", error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
