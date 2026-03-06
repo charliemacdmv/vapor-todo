@@ -16,42 +16,51 @@ const db = admin.firestore();
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    console.log("Fireflies Payload:", JSON.stringify(body)); // Helps us debug in Vercel logs
+    const meetingId = body.meetingId || body.id;
+    
+    // 1. THE SAFETY WAIT
+    // We wait 10 seconds to give the Fireflies AI time to finish the summary
+    await new Promise(resolve => setTimeout(resolve, 10000));
 
-    // 1. IMPROVED TITLE LOGIC
-    // Tries meeting_title, then title, then defaults to "Meeting Note"
-    const title = body.meeting_title || body.title || "Meeting Note";
+    // 2. FETCH THE REAL DATA
+    // We don't trust the webhook body; we ask Fireflies for the latest version of this meeting
+    const response = await fetch(`https://api.fireflies.ai/graphql`, {
+      method: 'POST',
+      headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer 65ea307e-9c63-43ec-b80b-ca51bc547e6c` // <--- GET THIS FROM FIREFLIES SETTINGS
+      },
+      body: JSON.stringify({
+          query: `query {
+            transcript(id: "${meetingId}") {
+              title
+              summary {
+                action_items
+              }
+            }
+          }`
+      })
+    });
 
-    // 2. IMPROVED TASK LOGIC
-    // Fireflies sometimes sends 'action_items', sometimes 'content', or a nested 'transcript'
-    let rawTasks = [];
-    if (body.action_items && Array.isArray(body.action_items)) {
-      rawTasks = body.action_items;
-    } else if (body.transcript?.action_items) {
-      rawTasks = body.transcript.action_items;
-    } else if (body.summary?.action_items) {
-      rawTasks = body.summary.action_items;
-    }
+    const { data } = await response.json();
+    const transcript = data?.transcript;
 
-    // YOUR EMAIL (Ensure this is your Microsoft/Vapor email)
-    const MY_EMAIL = "charliemacdmv@gmail.com"; 
+    if (!transcript) throw new Error("Could not fetch transcript data");
 
+    const title = (transcript.title || "New Meeting").toUpperCase();
+    const rawTasks = transcript.summary?.action_items || [];
+
+    // 3. SYNC TO VAPOR
+    const MY_EMAIL = "charliemacdmv@gmail.com";
     const listId = Math.random().toString(36).substring(7);
     
     await db.collection('projects').doc(listId).set({
-      name: `📅 ${title.toUpperCase()}`,
-      tasks: rawTasks.map((item: any) => {
-        // If it's a string, use it. If it's an object, try to find 'text' or 'content'
-        const taskText = typeof item === 'string' 
-          ? item 
-          : (item.text || item.content || "New Task");
-
-        return {
-          id: Math.random().toString(36).substring(7),
-          text: taskText,
-          completed: false
-        };
-      }),
+      name: `📅 ${title}`,
+      tasks: rawTasks.map((text: string) => ({
+        id: Math.random().toString(36).substring(7),
+        text: text,
+        completed: false
+      })),
       bgColor: '#1e293b',
       isCompleted: false,
       ownerId: "fireflies-sync",
@@ -62,7 +71,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error("Sync Error:", error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
