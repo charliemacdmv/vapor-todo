@@ -8,7 +8,7 @@ import {
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, 
-  GoogleAuthProvider, signInWithPopup, signOut 
+  signOut 
 } from "firebase/auth";
 
 // DnD Kit
@@ -34,7 +34,6 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0
 const db = getFirestore(app);
 const auth = getAuth(app);
 
-// Types
 type Accent = 'gray' | 'indigo' | 'violet' | 'fuchsia' | 'rose' | 'amber' | 'emerald' | 'teal' | 'cyan' | 'lime';
 const ACCENT_CLASS_MAP: Record<Accent, string> = {
   gray: 'bg-zinc-600', indigo: 'bg-indigo-600', violet: 'bg-violet-600', fuchsia: 'bg-fuchsia-600',
@@ -81,6 +80,7 @@ export default function ProductivityApp() {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid); setUserEmail(user.email); setUserPhoto(user.photoURL);
+        // We fetch ALL projects for the user so we can switch tabs instantly
         const q = query(collection(db, "projects"), where("allowedEmails", "array-contains", user.email || user.uid), orderBy("order", "asc"));
         const unsubProjects = onSnapshot(q, (s) => setProjects(s.docs.map(d => ({ id: d.id, ...d.data() } as Project))));
         onSnapshot(doc(db, "users", user.uid), (d) => { if (d.exists() && d.data().accent) setAccent(d.data().accent); });
@@ -98,7 +98,16 @@ export default function ProductivityApp() {
   const addProject = async () => {
     if (!newProjectName.trim() || !userId) return;
     const id = Math.random().toString(36).substring(7);
-    await setDoc(doc(db, "projects", id), { name: newProjectName.trim(), tasks: [], bgColor: '', isCompleted: false, ownerId: userId, allowedEmails: [userEmail || userId], sharedWith: [], order: projects.length });
+    await setDoc(doc(db, "projects", id), { 
+      name: newProjectName.trim(), 
+      tasks: [], 
+      bgColor: '', 
+      isCompleted: false, 
+      ownerId: userId, 
+      allowedEmails: [userEmail || userId], 
+      sharedWith: [], 
+      order: projects.length 
+    });
     setNewProjectName('');
   };
 
@@ -122,8 +131,25 @@ export default function ProductivityApp() {
 
   if (!mounted) return null;
 
+  // --- THE MASTER FILTER LOGIC ---
+  const filteredProjects = projects.filter(project => {
+    const matchesSearch = project.name.toLowerCase().includes(searchQuery.toLowerCase());
+    if (!matchesSearch) return false;
+
+    if (activeTab === 'active') {
+      // Show if the card isn't archived AND it has uncompleted tasks (or no tasks yet)
+      const hasActiveTasks = project.tasks.length === 0 || project.tasks.some(t => !t.completed);
+      return !project.isCompleted && hasActiveTasks;
+    } else {
+      // Show in Archive if the CARD is archived OR if it has completed tasks
+      const hasCompletedTasks = project.tasks.some(t => t.completed);
+      return project.isCompleted || hasCompletedTasks;
+    }
+  });
+
   return (
     <div className={`min-h-screen ${isDark ? 'dark bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`} style={{ fontFamily: 'Arial, sans-serif' }}>
+      {/* HEADER SECTION (Same as before) */}
       <div className={`${ACCENT_CLASS_MAP[accent]} text-white px-6 py-2 flex justify-between items-center shadow-md`}>
         <div className="flex items-center gap-4">
           <h1 className="text-lg font-bold italic uppercase tracking-tighter">Vapor</h1>
@@ -146,6 +172,7 @@ export default function ProductivityApp() {
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
+        {/* TABS & SEARCH */}
         <div className="flex flex-col md:flex-row gap-4 justify-between items-center mb-8">
           <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
             <button onClick={() => setActiveTab('active')} className={`px-4 py-1.5 text-[10px] font-bold uppercase rounded-md ${activeTab === 'active' ? 'bg-white dark:bg-zinc-800 shadow-sm text-black dark:text-white' : 'text-zinc-500'}`}>Active</button>
@@ -162,58 +189,51 @@ export default function ProductivityApp() {
         </div>
 
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={projects.map(p => p.id)} strategy={rectSortingStrategy}>
+          <SortableContext items={filteredProjects.map(p => p.id)} strategy={rectSortingStrategy}>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 items-start">
-              {projects.filter(p => (activeTab === 'active' ? !p.isCompleted : p.isCompleted) && p.name.toLowerCase().includes(searchQuery.toLowerCase())).map((project) => {
+              {filteredProjects.map((project) => {
                 const contrast = getContrastColor(project.bgColor);
+                // Important: Only show tasks relevant to the tab
+                const displayTasks = project.tasks.filter(t => activeTab === 'active' ? !t.completed : t.completed);
+
                 return (
                   <SortableProject key={project.id} id={project.id}>
                     {({ attributes, listeners }: any) => (
                       <div style={{ backgroundColor: project.bgColor || undefined }} className={`group border-2 border-zinc-100 dark:border-zinc-800/50 rounded-xl transition-all ${!project.bgColor ? 'bg-white dark:bg-zinc-900' : ''} p-3`}>
                         <div className="flex justify-between items-center mb-3">
                           <div className="flex flex-col gap-1 truncate w-[60%]">
-                            {/* Bumped to 14px */}
                             <span {...attributes} {...listeners} className={`cursor-grab active:cursor-grabbing uppercase text-[14px] font-bold truncate ${contrast}`}>{project.name}</span>
-                            <div className="flex -space-x-1">
-                              {project.sharedWith?.map((sw, i) => <div key={i} className="w-3.5 h-3.5 rounded-full bg-zinc-700 border border-black/10 text-[6px] flex items-center justify-center text-white" title={sw.email}>{sw.email[0].toUpperCase()}</div>)}
-                            </div>
                           </div>
                           <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={() => {const e = prompt("Email:"); if(e) updateDoc(doc(db,"projects",project.id),{allowedEmails:arrayUnion(e.toLowerCase()),sharedWith:arrayUnion({email:e.toLowerCase()})})}} className={`text-[10px] ${contrast}`}>👤</button>
-                            <div className="relative w-4 h-4 flex items-center justify-center">
-                               <span className={`text-[11px] ${contrast}`}>🎨</span>
-                               <input type="color" className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" onChange={(e) => updateDoc(doc(db, "projects", project.id), { bgColor: e.target.value })} />
-                            </div>
-                            <button onClick={() => updateDoc(doc(db, "projects", project.id), { isCompleted: !project.isCompleted })} className={`text-[11px] ${contrast}`}>✅</button>
+                            <button onClick={() => updateDoc(doc(db, "projects", project.id), { isCompleted: !project.isCompleted })} className={`text-[11px] ${contrast}`}>{project.isCompleted ? '♻️' : '✅'}</button>
                             <button onClick={() => confirm("Delete?") && deleteDoc(doc(db,"projects",project.id))} className="text-rose-500 text-[11px]">🗑️</button>
                           </div>
                         </div>
 
                         <div className="space-y-1">
-                          {project.tasks.filter(t => activeTab === 'completed' ? t.completed : !t.completed).map((task) => (
+                          {displayTasks.map((task) => (
                             <div key={task.id} className={`flex items-center justify-between rounded-md p-1.5 ${project.bgColor ? 'bg-black/10' : 'bg-zinc-50 dark:bg-zinc-800'}`}>
-                              {editingTaskId === task.id ? (
-                                <input 
-                                  autoFocus 
-                                  /* Bumped to 12px */
-                                  className={`text-[12px] font-bold bg-transparent border-none outline-none flex-grow ${contrast}`}
-                                  defaultValue={task.text}
-                                  onBlur={(e) => saveTaskEdit(project.id, project.tasks, task.id, e.target.value)}
-                                  onKeyDown={(e) => e.key === 'Enter' && saveTaskEdit(project.id, project.tasks, task.id, e.currentTarget.value)}
-                                />
-                              ) : (
-                                <span 
-                                  onClick={() => setEditingTaskId(task.id)}
-                                  /* Bumped to 12px */
-                                  className={`text-[12px] font-bold leading-tight flex-grow pr-2 cursor-text ${task.completed ? 'line-through opacity-30' : contrast}`}
-                                >
-                                  {task.text}
-                                </span>
-                              )}
-                              <button onClick={() => updateDoc(doc(db,"projects",project.id),{tasks:project.tasks.map(t=>t.id===task.id?{...t,completed:!t.completed}:t)})} className={`text-[9px] font-bold ${task.completed ? 'text-zinc-400' : 'text-emerald-500'}`}>{task.completed ? 'UNDO' : 'DONE'}</button>
+                              <span 
+                                onClick={() => setEditingTaskId(task.id)}
+                                className={`text-[12px] font-bold leading-tight flex-grow pr-2 cursor-text ${task.completed ? 'line-through opacity-30' : contrast}`}
+                              >
+                                {task.text}
+                              </span>
+                              <button 
+                                onClick={() => updateDoc(doc(db,"projects",project.id),{tasks:project.tasks.map(t=>t.id===task.id?{...t,completed:!t.completed}:t)})} 
+                                className={`text-[9px] font-bold ${task.completed ? 'text-zinc-400' : 'text-emerald-500'}`}
+                              >
+                                {task.completed ? 'UNDO' : 'DONE'}
+                              </button>
                             </div>
                           ))}
-                          {activeTab === 'active' && <input placeholder="ADD..." className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1 text-[11px] font-bold ${contrast} outline-none opacity-40 focus:opacity-100`} onKeyDown={e => { if (e.key === 'Enter') { updateDoc(doc(db,"projects",project.id),{tasks:[...project.tasks,{id:Math.random().toString(36).substring(7),text:e.currentTarget.value,completed:false}]}); e.currentTarget.value = ''; } }} />}
+                          {activeTab === 'active' && (
+                            <input 
+                              placeholder="ADD..." 
+                              className={`w-full bg-transparent border-b border-zinc-200 dark:border-zinc-800 py-1 text-[11px] font-bold ${contrast} outline-none opacity-40 focus:opacity-100`} 
+                              onKeyDown={e => { if (e.key === 'Enter') { updateDoc(doc(db,"projects",project.id),{tasks:[...project.tasks,{id:Math.random().toString(36).substring(7),text:e.currentTarget.value,completed:false}]}); e.currentTarget.value = ''; } }} 
+                            />
+                          )}
                         </div>
                       </div>
                     )}
