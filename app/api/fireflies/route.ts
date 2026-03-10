@@ -31,7 +31,7 @@ export async function POST(request: Request) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer YOUR_FIREFLIES_API_KEY` // <--- PASTE YOUR KEY HERE
+          'Authorization': `Bearer 65ea307e-9c63-43ec-b80b-ca51bc547e6c` // <--- PASTE YOUR KEY HERE
         },
         body: JSON.stringify({
           query: `query Transcript($transcriptId: String!) {
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     }
 
     // 2. THE SYNC: Using your specific email to ensure it shows up for you
-    const MY_EMAIL = "your-actual-email@example.com"; 
+    const MY_EMAIL = "charliemacdmv@gmail.com"; 
     const listId = Math.random().toString(36).substring(7);
 
     await setDoc(doc(db, "projects", listId), {
